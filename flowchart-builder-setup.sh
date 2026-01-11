@@ -190,19 +190,32 @@ function buildJson(nodes, edges) {
     }
   }
 
-  // BFS assign depth
+  // BFS assign depth and stable slot positions
   const depthMap = {};
+  const slotMap = {}; // Stable position within each depth level
   depthMap[rootId] = 0;
+  slotMap[rootId] = 0; // Root is at slot 0
   const queue = [rootId];
 
   while (queue.length) {
     const cur = queue.shift();
     const depth = depthMap[cur];
+    const slot = slotMap[cur];
     const childs = childrenMap[cur] || [];
-    childs.forEach(e => {
+    
+    // Sort children by x position to maintain left-to-right order
+    const sortedChildren = childs.slice().sort((a, b) => {
+      const nodeA = nodeMap[a.target];
+      const nodeB = nodeMap[b.target];
+      return nodeA.position.x - nodeB.position.x;
+    });
+    
+    sortedChildren.forEach((e, idx) => {
       const cid = e.target;
       if (depthMap[cid] == null) {
         depthMap[cid] = depth + 1;
+        // Binary tree slot assignment: left child = 2*parent, right = 2*parent + 1
+        slotMap[cid] = slot * 2 + idx;
         queue.push(cid);
       }
     });
@@ -212,7 +225,7 @@ function buildJson(nodes, edges) {
   const depthNodes = {};
   Object.entries(depthMap).forEach(([id, depth]) => {
     if (!depthNodes[depth]) depthNodes[depth] = [];
-    depthNodes[depth].push(id);
+    depthNodes[depth].push({ id, slot: slotMap[id] });
   });
 
   const sortedDepths = Object.keys(depthNodes)
@@ -228,16 +241,19 @@ function buildJson(nodes, edges) {
       const prevNodes = depthNodes[prevDepth];
       // if any node at previous level has >= 2 children, branch
       branchFromPrev = prevNodes.some(
-        nid => (childrenMap[nid] || []).length >= 2
+        ({id}) => (childrenMap[id] || []).length >= 2
       );
     }
 
+    // Sort nodes by slot position
+    const sortedNodes = depthNodes[depth].slice().sort((a, b) => a.slot - b.slot);
+
     rows.push({
       branch_from_prev: branchFromPrev,
-      nodes: depthNodes[depth].map(id => {
+      nodes: sortedNodes.map(({id, slot}) => {
         const node = nodeMap[id];
         const label = node?.data?.label || "";
-        const entry = { id, label };
+        const entry = { id, label, slot }; // Include slot in output
         if (label.trim().toLowerCase() === 'end') entry.color = "lightcoral";
         if (id === rootId && label.trim().toLowerCase() !== 'end') entry.color = "lightblue";
         return entry;
@@ -255,13 +271,20 @@ function buildJson(nodes, edges) {
   const specialChildren = [];
   for (const [pid, list] of Object.entries(childrenMap)) {
     if (list.length === 2) {
+      // Sort by x position to determine left/right
+      const sorted = list.slice().sort((a, b) => {
+        const nodeA = nodeMap[a.target];
+        const nodeB = nodeMap[b.target];
+        return nodeA.position.x - nodeB.position.x;
+      });
+      
       specialChildren.push({
-        child: list[0].target,
+        child: sorted[0].target,
         parent: pid,
         side: "left"
       });
       specialChildren.push({
-        child: list[1].target,
+        child: sorted[1].target,
         parent: pid,
         side: "right"
       });
@@ -582,7 +605,7 @@ def create_flowchart_image(cfg):
 
     num_rows = len(rows)
 
-    # Compute branching per row & widths
+    # Compute branching per row & widths (same as before - keeps *2 + 1 logic)
     widths = [total_columns]
     branch_from_prev = [False] * num_rows
     
@@ -597,19 +620,28 @@ def create_flowchart_image(cfg):
     def get_width(row):
         return widths[row]
 
-    # Map node ids to (row, pos) and collect node metadata
+    # Map node ids to (row, slot) and collect node metadata
     node_meta = {}
     for row_idx, row in enumerate(rows):
         node_list = row["nodes"]
-        for pos, n in enumerate(node_list):
+        for n in node_list:
             nid = n["id"]
             node_meta[nid] = {
                 "row": row_idx,
-                "pos": pos,
+                "slot": n["slot"],  # Use stable slot instead of position in array
                 "label": n["label"],
                 "color": n.get("color", "white"),
             }
 
+    # Build parent-child relationship for single child centering
+    parent_map = {}
+    children_count = {}
+    for e in edges_cfg:
+        parent_id = e["from"]
+        child_id = e["to"]
+        parent_map[child_id] = parent_id
+        children_count[parent_id] = children_count.get(parent_id, 0) + 1
+    
     # Special child alignment
     special_children = {}
     for sc in special_children_cfg:
@@ -617,24 +649,85 @@ def create_flowchart_image(cfg):
         parent_id = sc["parent"]
         side = sc["side"]
         special_children[child_id] = (parent_id, side)
+    
+    # Normalize slot positions per row to fit within available columns
+    def get_normalized_position(row, slot, width):
+        """Calculate start column, normalizing slots to fit in available space"""
+        # Find min and max slots for this row
+        row_data = rows[row]
+        slots = [n["slot"] for n in row_data["nodes"]]
+        min_slot = min(slots)
+        max_slot = max(slots)
+        
+        # If all nodes at same slot, center it
+        if min_slot == max_slot:
+            return (total_columns - width) / 2
+        
+        # Normalize slot to position within available columns
+        # Each node needs (width + 1) columns, but last node only needs width
+        total_needed = (max_slot - min_slot + 1) * (width + 1) - 1
+        
+        if total_needed <= total_columns:
+            # All nodes fit - use slot-based positioning centered in canvas
+            offset = (total_columns - total_needed) / 2
+            return offset + (slot - min_slot) * (width + 1)
+        else:
+            # Nodes would overflow - compress spacing proportionally
+            available = total_columns - width
+            slot_range = max_slot - min_slot
+            return (slot - min_slot) * (available / slot_range)
 
-    def get_start_col(row, pos, node_id):
+    # Cache for computed positions to maintain alignment
+    position_cache = {}
+    
+    def get_start_col(row, node_id, node_slot):
+        """Calculate start column using stable slot position"""
+        # Return cached position if already computed
+        if node_id in position_cache:
+            return position_cache[node_id]
+        
         width = get_width(row)
+        
+        # Check if this node has special alignment (2-child decision branches)
         sc = special_children.get(node_id)
         if sc is not None:
             parent_id, side = sc
             parent = node_meta[parent_id]
             parent_row = parent["row"]
-            parent_pos = parent["pos"]
             parent_width = get_width(parent_row)
-            parent_start = parent_pos * (parent_width + 1)
+            
+            # Get parent's actual cached position (or compute it)
+            parent_start = get_start_col(parent_row, parent_id, parent["slot"])
 
             if side == "left":
-                return parent_start
+                result = parent_start
             elif side == "right":
-                return parent_start + parent_width - width
+                result = parent_start + parent_width - width
+            else:
+                result = get_normalized_position(row, node_slot, width)
+            
+            position_cache[node_id] = result
+            return result
+        
+        # Check if this is a single child - center it under parent
+        if node_id in parent_map:
+            parent_id = parent_map[node_id]
+            if children_count.get(parent_id, 0) == 1:
+                # Single child - center under parent
+                parent = node_meta[parent_id]
+                parent_row = parent["row"]
+                parent_width = get_width(parent_row)
+                parent_start = get_start_col(parent_row, parent_id, parent["slot"])
+                parent_center = parent_start + parent_width / 2
+                child_center = width / 2
+                result = parent_center - child_center
+                position_cache[node_id] = result
+                return result
 
-        return pos * (width + 1)
+        # Use normalized slot position for other nodes
+        result = get_normalized_position(row, node_slot, width)
+        position_cache[node_id] = result
+        return result
 
     # Figure setup
     fig_width = total_columns * col_width + 1
@@ -649,12 +742,12 @@ def create_flowchart_image(cfg):
     node_positions = {}
     for nid, meta in node_meta.items():
         row = meta["row"]
-        pos = meta["pos"]
+        slot = meta["slot"]
         label = meta["label"]
         color = meta["color"]
 
         width = get_width(row)
-        start_col = get_start_col(row, pos, nid)
+        start_col = get_start_col(row, nid, slot)
 
         x = start_col * col_width
         y = (num_rows - row - 1) * (row_height + row_gap)

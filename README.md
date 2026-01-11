@@ -1,4 +1,4 @@
-# Flowchart Editor - Complete Setup Guide
+# Flowchart Builder - Complete Setup Guide
 
 A React-based flowchart editor that exports directly to PNG using Python/matplotlib.
 
@@ -19,7 +19,7 @@ A React-based flowchart editor that exports directly to PNG using Python/matplot
 
 ```bash
 sudo apt update
-sudo apt install -y nodejs npm python3 python3-pip python3-venv
+sudo apt install -y nodejs npm python3 python3-pip python3-venv wget
 ```
 
 ### 2. Create and Activate Python Virtual Environment
@@ -32,11 +32,18 @@ source venv/bin/activate
 
 **Note:** You'll need to activate the venv every time you want to run the app.
 
-### 3. Run the Setup Script
+### 3. Download and Run the Setup Script
 
 ```bash
 # Make sure you're in the venv (you should see (venv) in your prompt)
+
+# Download the setup script
+wget https://raw.githubusercontent.com/PentestPlaybook/flowchart-builder/refs/heads/main/flowchart-builder-setup.sh
+
+# Make it executable
 chmod +x flowchart-builder-setup.sh
+
+# Run the setup
 ./flowchart-builder-setup.sh
 ```
 
@@ -164,6 +171,12 @@ which python3
 python3 --version
 ```
 
+### Download fails
+If `wget` is not available, use `curl` instead:
+```bash
+curl -O https://raw.githubusercontent.com/PentestPlaybook/flowchart-builder/refs/heads/main/flowchart-builder-setup.sh
+```
+
 ---
 
 ## 📝 Notes
@@ -173,7 +186,6 @@ python3 --version
 - Python script runs as a subprocess when exporting
 - JSON still visible in browser for debugging/reference
 - Only matplotlib is required (no Flask, no CORS)
-
 ---
 
 Enjoy! 🎨
